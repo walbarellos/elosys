@@ -924,6 +924,8 @@ export type AssetsRankingPage = { rows: AssetsRankingRow[]; total: number };
 
 export function getAssetsRanking(opts: {
   year?: number;
+  state?: string;
+  municipality?: string;
   order?: "asc" | "desc";
   limit?: number;
   offset?: number;
@@ -931,6 +933,15 @@ export function getAssetsRanking(opts: {
   const limit = opts.limit ?? 50;
   const offset = opts.offset ?? 0;
   const sortDir = opts.order === "asc" ? "ASC" : "DESC";
+
+  const muniJoin = opts.municipality != null
+    ? "JOIN politician_history ph_muni ON ph_muni.id = da.history_id AND ph_muni.municipality = ?"
+    : "";
+  const muniArgs = opts.municipality != null ? [opts.municipality] : [];
+
+  const stateWhere = opts.state != null ? " AND da.state = ?" : "";
+  const stateArgs = opts.state != null ? [opts.state] : [];
+
   const yearArgs = opts.year != null ? [opts.year] : [];
 
   // Each declaration is a full snapshot, so "all years" uses only each person's latest year
@@ -942,17 +953,24 @@ export function getAssetsRanking(opts: {
          WHERE person_id IS NOT NULL
          GROUP BY person_id
        ) latest ON latest.person_id = da.person_id AND latest.year = da.year`;
-  const yearWhere = opts.year != null ? "WHERE da.year = ? AND da.person_id IS NOT NULL" : "WHERE da.person_id IS NOT NULL";
+  const yearWhere = opts.year != null
+    ? "WHERE da.year = ? AND da.person_id IS NOT NULL"
+    : "WHERE da.person_id IS NOT NULL";
+
+  const filterArgs = [...muniArgs, ...yearArgs, ...stateArgs];
 
   const total = (
     db()
       .prepare(
         `SELECT count(*) AS n FROM (
-           SELECT da.person_id FROM declared_assets da ${latestYearJoin} ${yearWhere}
+           SELECT da.person_id FROM declared_assets da
+           ${muniJoin}
+           ${latestYearJoin}
+           ${yearWhere}${stateWhere}
            GROUP BY da.person_id
          )`
       )
-      .get(...yearArgs) as { n: number }
+      .get(...filterArgs) as { n: number }
   ).n;
 
   const rows = db()
@@ -960,12 +978,13 @@ export function getAssetsRanking(opts: {
       `WITH agg AS (
          SELECT da.person_id, count(*) AS assetCount, coalesce(sum(da.value_cents), 0) AS assetTotalCents
          FROM declared_assets da
+         ${muniJoin}
          ${latestYearJoin}
-         ${yearWhere}
+         ${yearWhere}${stateWhere}
          GROUP BY da.person_id
        )
        SELECT a.person_id AS personId, p.canonical_name AS name, a.assetCount, a.assetTotalCents,
-              ph.office, ph.party_abbr AS partyAbbr, ph.state, ph.year
+              ph.office, ph.party_abbr AS partyAbbr, ph.municipality, ph.state, ph.year
        FROM agg a
        JOIN people p ON p.id = a.person_id
        LEFT JOIN politician_history ph ON ph.id = (
@@ -978,7 +997,7 @@ export function getAssetsRanking(opts: {
        ORDER BY a.assetTotalCents ${sortDir}
        LIMIT ? OFFSET ?`
     )
-    .all(...yearArgs, ...yearArgs, limit, offset) as Array<Record<string, unknown>>;
+    .all(...filterArgs, ...yearArgs, limit, offset) as Array<Record<string, unknown>>;
 
   const photoUrls = batchPhotoUrls(rows.map((r) => r.personId as number));
   return {
@@ -2085,12 +2104,26 @@ const RULE_LABEL: Record<string, string> = {
   disproportionate_expense: "despesa desproporcional",
 };
 
-export function getAiReviewSummary(): { total: number; byVerdict: Record<string, number>; model: string | null } {
+export function getAiReviewSummary(opts?: { state?: string; municipality?: string }): { total: number; byVerdict: Record<string, number>; model: string | null } {
+  let where = "";
+  const params: unknown[] = [];
+  if (opts?.state) {
+    where = `JOIN signal s ON s.id = signal_ai_review.signal_id
+             WHERE s.id IN (
+               SELECT sa.signal_id FROM signal_actor sa
+               JOIN people pe ON pe.id = sa.actor_id AND sa.type = 'person'
+               JOIN politician_history ph ON ph.person_id = pe.id
+               WHERE ph.state = ? ${opts.municipality ? "AND ph.municipality = ?" : ""}
+             )`;
+    params.push(opts.state);
+    if (opts.municipality) params.push(opts.municipality);
+  }
+
   const byVerdict = Object.fromEntries(
     (
       db()
-        .prepare(`SELECT verdict, count(*) AS n FROM signal_ai_review GROUP BY verdict`)
-        .all() as Array<{ verdict: string; n: number }>
+        .prepare(`SELECT verdict, count(*) AS n FROM signal_ai_review ${where} GROUP BY verdict`)
+        .all(...params) as Array<{ verdict: string; n: number }>
     ).map((r) => [r.verdict, r.n])
   );
   const total = Object.values(byVerdict).reduce((a, b) => a + b, 0);
@@ -2104,27 +2137,62 @@ export function getAiReviewSummary(): { total: number; byVerdict: Record<string,
 
 const VERDICT_ORDER = "CASE ar.verdict WHEN 'bizarro' THEN 0 WHEN 'inconclusivo' THEN 1 ELSE 2 END";
 
-export function getAiReviewCount(opts: { verdict?: AiVerdict; rule?: string }): number {
+export function getAiReviewCount(opts: {
+  verdict?: AiVerdict;
+  rule?: string;
+  state?: string;
+  municipality?: string;
+}): number {
+  let regionalWhere = "";
+  const regParams: unknown[] = [];
+  if (opts.state) {
+    regionalWhere = `AND s.id IN (
+      SELECT sa.signal_id FROM signal_actor sa
+      JOIN people pe ON pe.id = sa.actor_id AND sa.type = 'person'
+      JOIN politician_history ph ON ph.person_id = pe.id
+      WHERE ph.state = ? ${opts.municipality ? "AND ph.municipality = ?" : ""}
+    )`;
+    regParams.push(opts.state);
+    if (opts.municipality) regParams.push(opts.municipality);
+  }
+
   return (
     db()
       .prepare(
         `SELECT count(*) AS n FROM signal_ai_review ar
          JOIN signal s ON s.id = ar.signal_id
          JOIN rule_run rr ON rr.id = s.rule_run_id
-         WHERE (? IS NULL OR ar.verdict = ?) AND (? IS NULL OR rr.rule = ?)`
+         WHERE (? IS NULL OR ar.verdict = ?) AND (? IS NULL OR rr.rule = ?)
+         ${regionalWhere}`
       )
-      .get(opts.verdict ?? null, opts.verdict ?? null, opts.rule ?? null, opts.rule ?? null) as { n: number }
+      .get(opts.verdict ?? null, opts.verdict ?? null, opts.rule ?? null, opts.rule ?? null, ...regParams) as { n: number }
   ).n;
 }
 
 export function getAiReviews(opts: {
   verdict?: AiVerdict;
   rule?: string;
+  state?: string;
+  municipality?: string;
   limit?: number;
   offset?: number;
 }): AiReviewRow[] {
   const limit = opts.limit ?? 30;
   const offset = opts.offset ?? 0;
+
+  let regionalWhere = "";
+  const regParams: unknown[] = [];
+  if (opts.state) {
+    regionalWhere = `AND s.id IN (
+      SELECT sa.signal_id FROM signal_actor sa
+      JOIN people pe ON pe.id = sa.actor_id AND sa.type = 'person'
+      JOIN politician_history ph ON ph.person_id = pe.id
+      WHERE ph.state = ? ${opts.municipality ? "AND ph.municipality = ?" : ""}
+    )`;
+    regParams.push(opts.state);
+    if (opts.municipality) regParams.push(opts.municipality);
+  }
+
   const rows = db()
     .prepare(
       `SELECT ar.signal_id AS signalId, rr.rule, s.explanation AS signalExplanation,
@@ -2139,10 +2207,11 @@ export function getAiReviews(opts: {
        JOIN rule_run rr ON rr.id = s.rule_run_id
        WHERE (? IS NULL OR ar.verdict = ?) AND (? IS NULL OR rr.rule = ?)
          AND ar.reviewed_at = (SELECT max(x.reviewed_at) FROM signal_ai_review x WHERE x.signal_id = ar.signal_id)
+         ${regionalWhere}
        ORDER BY ${VERDICT_ORDER}, signalAmountCents DESC
        LIMIT ? OFFSET ?`
     )
-    .all(opts.verdict ?? null, opts.verdict ?? null, opts.rule ?? null, opts.rule ?? null, limit, offset) as Array<{
+    .all(opts.verdict ?? null, opts.verdict ?? null, opts.rule ?? null, opts.rule ?? null, ...regParams, limit, offset) as Array<{
       signalId: number; rule: string; signalExplanation: string; signalAmountCents: number;
       verdict: string; confidence: string | null; explanation: string; facts: string | null;
       model: string; reviewedAt: string;
@@ -2616,6 +2685,7 @@ export function getExpenseCategoryRanking(opts: {
   category?: string;
   /** undefined = all years */
   year?: number;
+  state?: string;
   limit?: number;
   offset?: number;
 }): ExpenseCategoryPage {
@@ -2689,8 +2759,12 @@ export function getExpenseCategoryRanking(opts: {
     expenseCategoryRankingCache.set(cacheKey, allRows);
   }
 
-  const total = allRows.length;
-  const pageRows = allRows.slice(offset, offset + limit);
+  let activeRows = allRows;
+  if (opts.state) {
+    activeRows = activeRows.filter((r) => r.state === opts.state);
+  }
+  const total = activeRows.length;
+  const pageRows = activeRows.slice(offset, offset + limit);
   const photoUrls = batchPhotoUrls(pageRows.map((r) => r.personId as number));
   return {
     total,
@@ -2760,3 +2834,560 @@ function safeJsonArray(s: string | null): string[] {
     return [];
   }
 }
+
+export type LocalCandidateRow = {
+  candidacyId: number;
+  personId: number;
+  name: string;
+  ballotName: string | null;
+  office: string | null;
+  partyAbbr: string | null;
+  year: number;
+  result: string | null;
+  municipality: string | null;
+  state: string | null;
+  assetsCents: number;
+  photoUrl: string | null;
+};
+
+export type LocalSignalRow = {
+  id: number;
+  type: string;
+  severity: "high" | "medium" | "low";
+  amountCents: number | null;
+  explanation: string;
+  pathLength: number | null;
+  personId: number;
+  personName: string;
+  photoUrl: string | null;
+  office: string | null;
+  partyAbbr: string | null;
+  municipality: string | null;
+  state: string | null;
+  year: number | null;
+  aiVerdict?: "bizarro" | "plausivel" | "inconclusivo" | null;
+  aiConfidence?: string | null;
+  aiExplanation?: string | null;
+  aiFacts?: string[] | null;
+};
+
+export type LocalStats = {
+  candidacies: number;
+  people: number;
+  assetsTotalCents: number;
+  donationsTotalCents: number;
+  expensesTotalCents: number;
+  signalsCount: number;
+  signalsAiReviewedCount: number;
+};
+
+export function getLocalCandidates(opts: {
+  state: string;
+  municipality?: string;
+  year?: number;
+  office?: string;
+  limit?: number;
+  offset?: number;
+}): { total: number; rows: LocalCandidateRow[] } {
+  let where = "WHERE ph.state = ?";
+  const params: unknown[] = [opts.state];
+
+  if (opts.municipality) {
+    where += " AND ph.municipality = ?";
+    params.push(opts.municipality);
+  }
+  if (opts.year) {
+    where += " AND ph.year = ?";
+    params.push(opts.year);
+  }
+  if (opts.office && opts.office !== "TODOS") {
+    where += " AND ph.office = ?";
+    params.push(opts.office);
+  }
+
+  const countRow = db()
+    .prepare(`SELECT count(*) as total FROM politician_history ph ${where}`)
+    .get(...params) as { total: number };
+
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+
+  const rawRows = db()
+    .prepare(
+      `SELECT ph.id as candidacyId, ph.person_id as personId, p.canonical_name as name,
+              ph.ballot_name as ballotName, ph.office, ph.party_abbr as partyAbbr,
+              ph.year, ph.result, ph.municipality, ph.state,
+              (SELECT coalesce(sum(value_cents), 0) FROM declared_assets WHERE history_id = ph.id) as assetsCents
+       FROM politician_history ph
+       JOIN people p ON p.id = ph.person_id
+       ${where}
+       ORDER BY assetsCents DESC, ph.ballot_name ASC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+  const photoMap = batchPhotoUrls(rawRows.map((r) => r.personId as number));
+
+  const rows: LocalCandidateRow[] = rawRows.map((r) => ({
+    candidacyId: r.candidacyId as number,
+    personId: r.personId as number,
+    name: r.name as string,
+    ballotName: (r.ballotName as string) ?? null,
+    office: (r.office as string) ?? null,
+    partyAbbr: (r.partyAbbr as string) ?? null,
+    year: r.year as number,
+    result: (r.result as string) ?? null,
+    municipality: (r.municipality as string) ?? null,
+    state: (r.state as string) ?? null,
+    assetsCents: r.assetsCents as number,
+    photoUrl: photoMap.get(r.personId as number) ?? null,
+  }));
+
+  return { total: countRow.total, rows };
+}
+
+export function getLocalSignals(opts: {
+  state: string;
+  municipality?: string;
+  type?: string;
+  limit?: number;
+  offset?: number;
+}): { total: number; rows: LocalSignalRow[] } {
+  let where = "WHERE ph.state = ?";
+  const params: unknown[] = [opts.state];
+
+  if (opts.municipality) {
+    where += " AND ph.municipality = ?";
+    params.push(opts.municipality);
+  }
+  if (opts.type) {
+    where += " AND s.type = ?";
+    params.push(opts.type);
+  }
+
+  const countRow = db()
+    .prepare(
+      `SELECT count(DISTINCT s.id) as total
+       FROM signal s
+       JOIN signal_actor sa ON sa.signal_id = s.id AND sa.type = 'person'
+       JOIN politician_history ph ON ph.person_id = sa.actor_id
+       ${where}`
+    )
+    .get(...params) as { total: number };
+
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+
+    const rawRows = db()
+    .prepare(
+      `SELECT s.id, s.type, s.severity, s.amount_cents as amountCents, s.explanation, s.path_length as pathLength,
+              p.id as personId, p.canonical_name as personName,
+              ph.office, ph.party_abbr as partyAbbr, ph.municipality, ph.state, ph.year,
+              sar.verdict as aiVerdict, sar.confidence as aiConfidence, sar.explanation as aiExplanation, sar.facts as aiFacts
+       FROM signal s
+       JOIN signal_actor sa ON sa.signal_id = s.id AND sa.type = 'person'
+       JOIN people p ON p.id = sa.actor_id
+       JOIN politician_history ph ON ph.person_id = p.id
+       LEFT JOIN signal_ai_review sar ON sar.signal_id = s.id
+       ${where}
+       GROUP BY s.id
+       ORDER BY (sar.verdict = 'bizarro') DESC, (sar.verdict IS NOT NULL) DESC, s.amount_cents DESC NULLS LAST
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+  const photoMap = batchPhotoUrls(rawRows.map((r) => r.personId as number));
+
+  const rows: LocalSignalRow[] = rawRows.map((r) => {
+    let aiFacts: string[] | null = null;
+    if (typeof r.aiFacts === "string") {
+      try {
+        const parsed = JSON.parse(r.aiFacts);
+        if (Array.isArray(parsed)) aiFacts = parsed.map(String);
+      } catch {}
+    }
+    return {
+      id: r.id as number,
+      type: r.type as string,
+      severity: r.severity as "high" | "medium" | "low",
+      amountCents: (r.amountCents as number) ?? null,
+      explanation: r.explanation as string,
+      pathLength: (r.pathLength as number) ?? null,
+      personId: r.personId as number,
+      personName: r.personName as string,
+      photoUrl: photoMap.get(r.personId as number) ?? null,
+      office: (r.office as string) ?? null,
+      partyAbbr: (r.partyAbbr as string) ?? null,
+      municipality: (r.municipality as string) ?? null,
+      state: (r.state as string) ?? null,
+      year: (r.year as number) ?? null,
+      aiVerdict: (r.aiVerdict as "bizarro" | "plausivel" | "inconclusivo") ?? null,
+      aiConfidence: (r.aiConfidence as string) ?? null,
+      aiExplanation: (r.aiExplanation as string) ?? null,
+      aiFacts,
+    };
+  });
+
+  return { total: countRow.total, rows };
+}
+
+export function getLocalStats(state: string, municipality?: string, year?: number): LocalStats {
+  let phWhere = "WHERE ph.state = ?";
+  const phParams: unknown[] = [state];
+  if (municipality) {
+    phWhere += " AND ph.municipality = ?";
+    phParams.push(municipality);
+  }
+  if (year) {
+    phWhere += " AND ph.year = ?";
+    phParams.push(year);
+  }
+
+  const counts = db()
+    .prepare(
+      `SELECT count(*) as candidacies, count(DISTINCT ph.person_id) as people
+       FROM politician_history ph
+       ${phWhere}`
+    )
+    .get(...phParams) as { candidacies: number; people: number };
+
+  const assets = db()
+    .prepare(
+      `SELECT coalesce(sum(da.value_cents), 0) as total
+       FROM declared_assets da
+       JOIN politician_history ph ON ph.id = da.history_id
+       ${phWhere}`
+    )
+    .get(...phParams) as { total: number };
+
+  const candIds = (
+    db()
+      .prepare(
+        `SELECT ph.tse_candidacy_id
+         FROM politician_history ph
+         ${phWhere} AND ph.tse_candidacy_id IS NOT NULL`
+      )
+      .all(...phParams) as Array<{ tse_candidacy_id: string }>
+  ).map((r) => r.tse_candidacy_id);
+
+  let donationsTotal = 0;
+  let expensesTotal = 0;
+  if (candIds.length > 0) {
+    for (let i = 0; i < candIds.length; i += 500) {
+      const chunk = candIds.slice(i, i + 500);
+      const qmarks = chunk.map(() => "?").join(",");
+      const yearFilter = year ? " AND year = " + year : "";
+      const d = db()
+        .prepare(`SELECT coalesce(sum(amount_cents), 0) as s FROM campaign_donation WHERE tse_candidacy_id IN (${qmarks})${yearFilter}`)
+        .get(...chunk) as { s: number };
+      const e = db()
+        .prepare(`SELECT coalesce(sum(amount_cents), 0) as s FROM campaign_expense WHERE tse_candidacy_id IN (${qmarks})${yearFilter}`)
+        .get(...chunk) as { s: number };
+      donationsTotal += d.s;
+      expensesTotal += e.s;
+    }
+  }
+
+  const signalCount = (
+    db()
+      .prepare(
+        `SELECT count(DISTINCT s.id) as total
+         FROM signal s
+         JOIN signal_actor sa ON sa.signal_id = s.id AND sa.type = 'person'
+         JOIN politician_history ph ON ph.person_id = sa.actor_id
+         ${phWhere}`
+      )
+      .get(...phParams) as { total: number }
+  ).total;
+
+  const aiReviewedCount = (
+    db()
+      .prepare(
+        `SELECT count(DISTINCT s.id) as total
+         FROM signal s
+         JOIN signal_actor sa ON sa.signal_id = s.id AND sa.type = 'person'
+         JOIN politician_history ph ON ph.person_id = sa.actor_id
+         JOIN signal_ai_review sar ON sar.signal_id = s.id
+         ${phWhere}`
+      )
+      .get(...phParams) as { total: number }
+  ).total;
+
+  return {
+    candidacies: counts.candidacies,
+    people: counts.people,
+    assetsTotalCents: assets.total,
+    donationsTotalCents: donationsTotal,
+    expensesTotalCents: expensesTotal,
+    signalsCount: signalCount,
+    signalsAiReviewedCount: aiReviewedCount,
+  };
+}
+
+export function getLocalAvailableOffices(state: string, municipality?: string, year?: number): string[] {
+  let where = "WHERE ph.state = ? AND ph.office IS NOT NULL";
+  const params: unknown[] = [state];
+  if (municipality) {
+    where += " AND ph.municipality = ?";
+    params.push(municipality);
+  }
+  if (year) {
+    where += " AND ph.year = ?";
+    params.push(year);
+  }
+
+  const rows = db()
+    .prepare(`SELECT DISTINCT ph.office FROM politician_history ph ${where} ORDER BY ph.office`)
+    .all(...params) as Array<{ office: string }>;
+
+  return rows.map((r) => r.office);
+}
+
+export function getLocalAvailableYears(state: string, municipality?: string): number[] {
+  let where = "WHERE ph.state = ?";
+  const params: unknown[] = [state];
+  if (municipality) {
+    where += " AND ph.municipality = ?";
+    params.push(municipality);
+  }
+
+  const rows = db()
+    .prepare(`SELECT DISTINCT ph.year FROM politician_history ph ${where} ORDER BY ph.year DESC`)
+    .all(...params) as Array<{ year: number }>;
+
+  return rows.map((r) => r.year);
+}
+
+export type LocalDiscourseRow = {
+  id: number;
+  text: string;
+  postedAt: string | null;
+  url: string | null;
+  likeCount: number | null;
+  repostCount: number | null;
+  handle: string;
+  personName: string;
+  office: string | null;
+  partyAbbr: string | null;
+  municipality: string | null;
+  severity: "high" | "medium" | "low" | null;
+  isOffensive: boolean;
+  quote: string | null;
+  explanation: string | null;
+};
+
+export function getAcreDiscoursePosts(opts: {
+  municipality?: string;
+  limit?: number;
+  offset?: number;
+}): { total: number; rows: LocalDiscourseRow[] } {
+  let where = "WHERE ph.state = 'AC'";
+  const params: unknown[] = [];
+  if (opts.municipality) {
+    where += " AND ph.municipality = ?";
+    params.push(opts.municipality);
+  }
+
+  const countRow = db()
+    .prepare(
+      `SELECT count(DISTINCT sp.id) as total
+       FROM social_post sp
+       JOIN social_account sa ON sa.id = sp.social_account_id
+       JOIN people pe ON pe.id = sa.person_id
+       JOIN politician_history ph ON ph.person_id = pe.id
+       ${where}`
+    )
+    .get(...params) as { total: number };
+
+  const limit = opts.limit ?? 25;
+  const offset = opts.offset ?? 0;
+
+  const rawRows = db()
+    .prepare(
+      `SELECT sp.id, sp.text, sp.posted_at as postedAt, sp.url, sp.like_count as likeCount, sp.repost_count as repostCount,
+              sa.handle, pe.canonical_name as personName, ph.office, ph.party_abbr as partyAbbr, ph.municipality,
+              spr.severity, spr.is_offensive as isOffensive, spr.quote, spr.explanation
+       FROM social_post sp
+       JOIN social_account sa ON sa.id = sp.social_account_id
+       JOIN people pe ON pe.id = sa.person_id
+       JOIN politician_history ph ON ph.person_id = pe.id
+       LEFT JOIN social_post_review spr ON spr.social_post_id = sp.id
+       ${where}
+       GROUP BY sp.id
+       ORDER BY spr.is_offensive DESC, spr.severity = 'high' DESC, sp.posted_at DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+  const rows: LocalDiscourseRow[] = rawRows.map((r) => ({
+    id: r.id as number,
+    text: r.text as string,
+    postedAt: (r.postedAt as string) ?? null,
+    url: (r.url as string) ?? null,
+    likeCount: (r.likeCount as number) ?? null,
+    repostCount: (r.repostCount as number) ?? null,
+    handle: r.handle as string,
+    personName: r.personName as string,
+    office: (r.office as string) ?? null,
+    partyAbbr: (r.partyAbbr as string) ?? null,
+    municipality: (r.municipality as string) ?? null,
+    severity: (r.severity as "high" | "medium" | "low") ?? null,
+    isOffensive: r.isOffensive === 1,
+    quote: (r.quote as string) ?? null,
+    explanation: (r.explanation as string) ?? null,
+  }));
+
+  return { total: countRow.total, rows };
+}
+
+export type LocalSocialAccount = {
+  platform: string;
+  url: string;
+};
+
+export type LocalCandidateSocialRow = {
+  personId: number;
+  ballotName: string;
+  fullName: string;
+  partyAbbr: string | null;
+  office: string | null;
+  municipality: string | null;
+  year: number;
+  photoUrl: string | null;
+  accounts: LocalSocialAccount[];
+};
+
+export type LocalSocialPlatformCount = {
+  platform: string;
+  count: number;
+};
+
+export function getLocalSocialPlatformCounts(opts: {
+  state: string;
+  municipality?: string;
+  year?: number;
+}): LocalSocialPlatformCount[] {
+  const whereClauses = ["sm.state = ?"];
+  const params: unknown[] = [opts.state];
+  if (opts.municipality) {
+    whereClauses.push("ph.municipality = ?");
+    params.push(opts.municipality);
+  }
+  if (opts.year) {
+    whereClauses.push("ph.year = ?");
+    params.push(opts.year);
+  }
+
+  const rows = db()
+    .prepare(
+      `SELECT sm.platform, count(DISTINCT sm.id) as count
+       FROM social_media sm
+       CROSS JOIN politician_history ph ON ph.year = sm.year AND ph.tse_candidacy_id = sm.tse_candidacy_id
+       WHERE ${whereClauses.join(" AND ")}
+       GROUP BY sm.platform
+       ORDER BY count DESC`
+    )
+    .all(...params) as Array<{ platform: string; count: number }>;
+
+  return rows;
+}
+
+export function getLocalSocialMediaDirectory(opts: {
+  state: string;
+  municipality?: string;
+  year?: number;
+  platform?: string;
+  office?: string;
+  limit?: number;
+  offset?: number;
+}): { total: number; rows: LocalCandidateSocialRow[] } {
+  const whereClauses = ["sm.state = ?"];
+  const params: unknown[] = [opts.state];
+  if (opts.municipality) {
+    whereClauses.push("ph.municipality = ?");
+    params.push(opts.municipality);
+  }
+  if (opts.year) {
+    whereClauses.push("ph.year = ?");
+    params.push(opts.year);
+  }
+  if (opts.office && opts.office !== "TODOS") {
+    whereClauses.push("ph.office = ?");
+    params.push(opts.office);
+  }
+  if (opts.platform && opts.platform !== "all") {
+    whereClauses.push("sm.platform = ?");
+    params.push(opts.platform);
+  }
+
+  const whereStr = whereClauses.join(" AND ");
+
+  const countRow = db()
+    .prepare(
+      `SELECT count(DISTINCT ph.person_id) as total
+       FROM social_media sm
+       CROSS JOIN politician_history ph ON ph.year = sm.year AND ph.tse_candidacy_id = sm.tse_candidacy_id
+       WHERE ${whereStr}`
+    )
+    .get(...params) as { total: number };
+
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+
+  const rawRows = db()
+    .prepare(
+      `SELECT 
+         ph.person_id as personId,
+         ph.ballot_name as ballotName,
+         ph.full_name as fullName,
+         ph.party_abbr as partyAbbr,
+         ph.office,
+         ph.municipality,
+         ph.year,
+         GROUP_CONCAT(sm.platform || ':::' || sm.url, '|||') as accountsRaw
+       FROM social_media sm
+       CROSS JOIN politician_history ph ON ph.year = sm.year AND ph.tse_candidacy_id = sm.tse_candidacy_id
+       WHERE ${whereStr}
+       GROUP BY ph.person_id, ph.year
+       ORDER BY 
+         CASE ph.office WHEN 'PREFEITO' THEN 1 WHEN 'GOVERNADOR' THEN 2 WHEN 'SENADOR' THEN 3 WHEN 'VICE-PREFEITO' THEN 4 WHEN 'VEREADOR' THEN 5 ELSE 6 END,
+         ph.ballot_name ASC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+  const personIds = rawRows.map((r) => r.personId as number);
+  const photoUrls = batchPhotoUrls(personIds);
+
+  const rows: LocalCandidateSocialRow[] = rawRows.map((r) => {
+    const rawAccounts = (r.accountsRaw as string) || "";
+    const seen = new Set<string>();
+    const accounts: LocalSocialAccount[] = [];
+    for (const item of rawAccounts.split("|||")) {
+      if (!item) continue;
+      const [platform, ...urlParts] = item.split(":::");
+      const url = urlParts.join(":::");
+      const key = `${platform}:${url}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        accounts.push({ platform: platform || "other", url });
+      }
+    }
+
+    return {
+      personId: r.personId as number,
+      ballotName: (r.ballotName as string) ?? "Sem Nome",
+      fullName: (r.fullName as string) ?? "",
+      partyAbbr: (r.partyAbbr as string) ?? null,
+      office: (r.office as string) ?? null,
+      municipality: (r.municipality as string) ?? null,
+      year: r.year as number,
+      photoUrl: photoUrls.get(r.personId as number) ?? null,
+      accounts,
+    };
+  });
+
+  return { total: countRow.total, rows };
+}
+
+

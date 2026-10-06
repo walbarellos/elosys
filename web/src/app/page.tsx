@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { SearchBox } from "@/components/search-box";
 import { TopSuppliers } from "@/components/top-suppliers";
 import { PageHeader } from "@/components/shell/shell-context";
@@ -55,8 +56,25 @@ export default async function Home({ searchParams }: PageProps<"/">) {
             Busque por nome ou CPF. Cada campo mostra de qual arquivo do TSE ele saiu, quando foi
             baixado e o hash que comprova que não foi alterado.
           </p>
-          <div className="mt-8">
+          <div className="mt-8 flex flex-col gap-3">
             <SearchBox />
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <span className="mono text-[11px] text-[var(--muted-2)]">puxar por localidade:</span>
+              <Link
+                href="/acre?local=rio-branco"
+                className="btn btn--sm btn--primary font-medium"
+                title="Puxar dados de candidatos, bens e sinais de Rio Branco (AC)"
+              >
+                📍 Rio Branco (AC)
+              </Link>
+              <Link
+                href="/acre?local=acre"
+                className="btn btn--sm"
+                title="Puxar dados do Acre inteiro"
+              >
+                📍 Acre (Todo o Estado)
+              </Link>
+            </div>
           </div>
         </div>
       </div>

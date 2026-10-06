@@ -24,6 +24,12 @@ export default async function RankingPage({ searchParams }: PageProps<"/ranking"
   const tipoParam = typeof sp.tipo === "string" ? sp.tipo : "";
   const tipo: Tipo = TIPOS.some((t) => t.value === tipoParam) ? (tipoParam as Tipo) : "bens";
 
+  const localParam = typeof sp.local === "string" ? sp.local : "";
+  const isRioBranco = localParam === "rio-branco";
+  const isAcre = localParam === "acre";
+  const state = isRioBranco || isAcre ? "AC" : undefined;
+  const municipality = isRioBranco ? "RIO BRANCO" : undefined;
+
   const anoParam = typeof sp.ano === "string" ? Number(sp.ano) : NaN;
   const year = Number.isInteger(anoParam) && years.includes(anoParam) ? anoParam : undefined;
 
@@ -32,6 +38,8 @@ export default async function RankingPage({ searchParams }: PageProps<"/ranking"
   const hrefFor = (params: Record<string, string | undefined>) => {
     const usp = new URLSearchParams();
     if (params.tipo && params.tipo !== "bens") usp.set("tipo", params.tipo);
+    const loc = params.local !== undefined ? params.local : localParam;
+    if (loc) usp.set("local", loc);
     if (params.ano) usp.set("ano", params.ano);
     if (params.page && params.page !== "1") usp.set("page", params.page);
     const qs = usp.toString();
@@ -53,6 +61,7 @@ export default async function RankingPage({ searchParams }: PageProps<"/ranking"
       <section>
         <h1 className="text-[26px] leading-tight font-medium tracking-tight">
           Ranking de candidatos — {tipo === "bens" ? "bens declarados" : "maior crescimento patrimonial"}
+          {isRioBranco ? " (Rio Branco / AC)" : isAcre ? " (Acre / AC)" : ""}
         </h1>
         {tipo === "bens" ? (
           <p className="mt-4 max-w-2xl text-[13px] leading-relaxed" style={{ color: "var(--muted)" }}>
@@ -77,18 +86,41 @@ export default async function RankingPage({ searchParams }: PageProps<"/ranking"
           {TIPOS.map((t) => (
             <Link
               key={t.value}
-              href={hrefFor({ tipo: t.value })}
+              href={hrefFor({ tipo: t.value, page: "1" })}
               className={`btn${tipo === t.value ? " btn--primary" : ""}`}
             >
               {t.label}
             </Link>
           ))}
         </div>
+
+        {/* Regional Filter Buttons */}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <span className="mono text-[11px] text-[var(--muted-2)]">Localidade:</span>
+          <Link
+            href={hrefFor({ local: "", page: "1" })}
+            className={`btn btn--sm${!localParam ? " btn--primary" : ""}`}
+          >
+            Brasil (Nacional)
+          </Link>
+          <Link
+            href={hrefFor({ local: "rio-branco", page: "1" })}
+            className={`btn btn--sm${isRioBranco ? " btn--primary" : ""}`}
+          >
+            📍 Rio Branco (AC)
+          </Link>
+          <Link
+            href={hrefFor({ local: "acre", page: "1" })}
+            className={`btn btn--sm${isAcre ? " btn--primary" : ""}`}
+          >
+            📍 Acre (Todo o Estado)
+          </Link>
+        </div>
       </section>
 
       <section>
         {tipo === "bens" ? (
-          <BensTable page={page} year={year} hrefFor={hrefFor} />
+          <BensTable page={page} year={year} state={state} municipality={municipality} hrefFor={hrefFor} />
         ) : (
           <CrescimentoTable page={page} hrefFor={hrefFor} />
         )}
@@ -98,10 +130,10 @@ export default async function RankingPage({ searchParams }: PageProps<"/ranking"
 }
 
 function BensTable({
-  page, year, hrefFor,
-}: { page: number; year?: number; hrefFor: (p: Record<string, string | undefined>) => string }) {
+  page, year, state, municipality, hrefFor,
+}: { page: number; year?: number; state?: string; municipality?: string; hrefFor: (p: Record<string, string | undefined>) => string }) {
   const { rows, total } = getAssetsRanking({
-    year, order: "desc", limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE,
+    year, state, municipality, order: "desc", limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE,
   });
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 

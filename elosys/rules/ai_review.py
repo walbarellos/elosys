@@ -59,6 +59,8 @@ def run(
     refresh: bool = False,
     order: str = "amount",
     min_amount_cents: int = 0,
+    state: str | None = None,
+    municipality: str | None = None,
 ) -> dict:
     by_verdict: dict[str, int] = {}
     reviewed = 0
@@ -68,8 +70,14 @@ def run(
         if rule not in REVIEWABLE_RULES:
             log.warning("regra desconhecida, pulando: %s", rule)
             continue
-        with step(log, f"{rule}: selecionar sinais (limit {limit}, order {order})"):
-            targets = _select_signals(con, rule, model, limit, refresh, order, min_amount_cents)
+        location_desc = f", state {state}" if state else ""
+        if municipality:
+            location_desc += f", municipality {municipality}"
+        with step(log, f"{rule}: selecionar sinais (limit {limit}, order {order}{location_desc})"):
+            targets = _select_signals(
+                con, rule, model, limit, refresh, order, min_amount_cents,
+                state=state, municipality=municipality,
+            )
         log.info("  %s sinais para revisar", len(targets))
 
         rc = RowCounter(log, f"{rule} revisados", every=10)
@@ -130,12 +138,30 @@ def _summary(reviewed: int, by_verdict: dict, errors: int, *, aborted: bool = Fa
 def _select_signals(
     con: sqlite3.Connection, rule: str, model: str, limit: int, refresh: bool,
     order: str, min_amount_cents: int,
+    state: str | None = None,
+    municipality: str | None = None,
 ) -> list[tuple[int, str]]:
+    extra_filter = ""
+    extra_params: list = []
+    if state:
+        extra_filter = (
+            "AND s.id IN ("
+            "  SELECT sa.signal_id FROM signal_actor sa "
+            "  JOIN people pe ON pe.id = sa.actor_id AND sa.type = 'person' "
+            "  JOIN politician_history ph ON ph.person_id = pe.id "
+            "  WHERE ph.state = ?"
+        )
+        extra_params.append(state)
+        if municipality:
+            extra_filter += " AND ph.municipality = ?"
+            extra_params.append(municipality)
+        extra_filter += ")"
+
     if refresh:
         con.execute(
-            "DELETE FROM signal_ai_review WHERE model = ? AND signal_id IN "
-            "(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ?)",
-            (model, rule),
+            f"DELETE FROM signal_ai_review WHERE model = ? AND signal_id IN "
+            f"(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ? {extra_filter})",
+            (model, rule, *extra_params),
         )
     amount_expr = (
         "coalesce(s.amount_cents, 0)"
@@ -152,9 +178,9 @@ def _select_signals(
         f"SELECT s.id, s.explanation FROM signal s "  # noqa: S608
         f"JOIN rule_run r ON r.id = s.rule_run_id "
         f"WHERE r.rule = ? AND s.id NOT IN (SELECT signal_id FROM signal_ai_review WHERE model = ?) "
-        f"AND {amount_expr} >= ? "
+        f"AND {amount_expr} >= ? {extra_filter} "
         f"ORDER BY {order_by} LIMIT ?",
-        (rule, model, min_amount_cents, limit),
+        (rule, model, min_amount_cents, *extra_params, limit),
     ).fetchall()
     return [(r["id"], r["explanation"]) for r in rows]
 

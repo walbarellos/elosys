@@ -37,37 +37,94 @@ export default async function AnaliseIaPage({ searchParams }: PageProps<"/sinais
   const rule = RULES.some((r) => r.value === ruleParam) ? ruleParam : undefined;
   const page = Math.max(1, Number(sp.page) || 1);
 
-  const summary = getAiReviewSummary();
-  const count = getAiReviewCount({ verdict, rule });
-  const reviews = getAiReviews({ verdict, rule, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE });
+  const localParam = typeof sp.local === "string" ? sp.local : undefined;
+  const state = localParam === "acre" || localParam === "rio-branco" ? "AC" : undefined;
+  const municipality = localParam === "rio-branco" ? "RIO BRANCO" : undefined;
+
+  const summary = getAiReviewSummary({ state, municipality });
+  const count = getAiReviewCount({ verdict, rule, state, municipality });
+  const reviews = getAiReviews({ verdict, rule, state, municipality, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE });
   const totalPages = Math.max(1, Math.ceil(count / PAGE_SIZE));
 
   const hrefFor = (p: Record<string, string | undefined>) => {
     const usp = new URLSearchParams();
-    if (p.verdict) usp.set("verdict", p.verdict);
-    if (p.rule) usp.set("rule", p.rule);
-    if (p.page && p.page !== "1") usp.set("page", p.page);
+    const merged: Record<string, string | undefined> = { local: localParam, verdict, rule, ...p };
+    if (merged.local) usp.set("local", merged.local);
+    if (merged.verdict) usp.set("verdict", merged.verdict);
+    if (merged.rule) usp.set("rule", merged.rule);
+    if (merged.page && merged.page !== "1") usp.set("page", merged.page);
     const qs = usp.toString();
     return `/sinais/analise-ia${qs ? `?${qs}` : ""}`;
   };
 
   return (
     <div className="flex flex-col gap-8">
-      <PageHeader group="Sinais" current="Análise de IA" />
+      <PageHeader
+        group="Sinais"
+        current="Análise de IA"
+        actions={
+          <div className="flex items-center gap-1.5">
+            <Link
+              href={hrefFor({ local: undefined, page: "1" })}
+              className={`btn btn--sm${!localParam ? " btn--primary" : ""}`}
+            >
+              Brasil
+            </Link>
+            <Link
+              href={hrefFor({ local: "rio-branco", page: "1" })}
+              className={`btn btn--sm${localParam === "rio-branco" ? " btn--primary" : ""}`}
+            >
+              📍 Rio Branco
+            </Link>
+            <Link
+              href={hrefFor({ local: "acre", page: "1" })}
+              className={`btn btn--sm${localParam === "acre" ? " btn--primary" : ""}`}
+            >
+              📍 Acre
+            </Link>
+          </div>
+        }
+      />
 
       <section>
-        <h1 className="text-[26px] leading-tight font-medium tracking-tight">
-          O que a IA achou estranho
-        </h1>
-        <p className="mt-4 max-w-2xl text-[13px] leading-relaxed" style={{ color: "var(--muted)" }}>
-          Cada sinal de <strong style={{ color: "var(--fg-2)" }}>doação circular</strong> ou{" "}
-          <strong style={{ color: "var(--fg-2)" }}>despesa desproporcional</strong> foi passado pra um modelo
-          barato (DeepSeek) com os fatos, e ele respondeu se aquilo é <em>rotineiro</em> ou{" "}
-          <em>genuinamente estranho</em>. A resposta, a explicação e os fatos que o modelo citou ficam
-          salvos junto do sinal.{" "}
-          <strong style={{ color: "var(--fg-2)" }}>Continua sendo indício, não prova</strong> — agora com a
-          opinião de uma máquina anexada, que também pode estar errada.
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h1 className="text-[26px] leading-tight font-medium tracking-tight">
+              O que a IA achou estranho {localParam === "rio-branco" ? "— Rio Branco (AC)" : localParam === "acre" ? "— Acre" : ""}
+            </h1>
+            <p className="mt-2 max-w-2xl text-[13px] leading-relaxed" style={{ color: "var(--muted)" }}>
+              Cada sinal de <strong style={{ color: "var(--fg-2)" }}>doação circular</strong> ou{" "}
+              <strong style={{ color: "var(--fg-2)" }}>despesa desproporcional</strong> foi passado pra um modelo
+              barato (DeepSeek) com os fatos, e ele respondeu se aquilo é <em>rotineiro</em> ou{" "}
+              <em>genuinamente estranho</em>. A resposta, a explicação e os fatos que o modelo citou ficam
+              salvos junto do sinal.{" "}
+              <strong style={{ color: "var(--fg-2)" }}>Continua sendo indício, não prova</strong> — agora com a
+              opinião de uma máquina anexada, que também pode estar errada.
+            </p>
+          </div>
+
+          <div className="card p-3 flex items-center gap-2">
+            <span className="mono text-[11px] text-[var(--muted-2)] uppercase mr-1">Região:</span>
+            <Link
+              href={hrefFor({ local: undefined, page: "1" })}
+              className={`btn btn--sm${!localParam ? " btn--primary font-semibold" : ""}`}
+            >
+              Brasil
+            </Link>
+            <Link
+              href={hrefFor({ local: "rio-branco", page: "1" })}
+              className={`btn btn--sm${localParam === "rio-branco" ? " btn--primary font-semibold" : ""}`}
+            >
+              📍 Rio Branco
+            </Link>
+            <Link
+              href={hrefFor({ local: "acre", page: "1" })}
+              className={`btn btn--sm${localParam === "acre" ? " btn--primary font-semibold" : ""}`}
+            >
+              📍 Acre
+            </Link>
+          </div>
+        </div>
 
         {summary.total === 0 ? null : (
           <div className="mono mt-6 flex flex-wrap items-center gap-x-6 gap-y-2" style={{ fontSize: 11, color: "var(--muted)" }}>
@@ -83,20 +140,20 @@ export default async function AnaliseIaPage({ searchParams }: PageProps<"/sinais
         )}
 
         <div className="mt-5 flex flex-wrap items-center gap-2">
-          <Link href={hrefFor({ rule })} className={`btn${!verdict ? " btn--primary" : ""}`}>
+          <Link href={hrefFor({ rule, page: "1" })} className={`btn${!verdict ? " btn--primary" : ""}`}>
             todos
           </Link>
           {VERDICTS.map((v) => (
-            <Link key={v} href={hrefFor({ verdict: v, rule })} className={`btn${verdict === v ? " btn--primary" : ""}`}>
+            <Link key={v} href={hrefFor({ verdict: v, rule, page: "1" })} className={`btn${verdict === v ? " btn--primary" : ""}`}>
               {VERDICT_LABEL[v]}
             </Link>
           ))}
           <div className="mx-2 h-4 w-px" style={{ background: "var(--border-1)" }} />
-          <Link href={hrefFor({ verdict })} className={`btn${!rule ? " btn--primary" : ""}`}>
+          <Link href={hrefFor({ verdict, page: "1" })} className={`btn${!rule ? " btn--primary" : ""}`}>
             toda regra
           </Link>
           {RULES.map((rr) => (
-            <Link key={rr.value} href={hrefFor({ verdict, rule: rr.value })} className={`btn${rule === rr.value ? " btn--primary" : ""}`}>
+            <Link key={rr.value} href={hrefFor({ verdict, rule: rr.value, page: "1" })} className={`btn${rule === rr.value ? " btn--primary" : ""}`}>
               {rr.label}
             </Link>
           ))}

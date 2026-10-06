@@ -199,6 +199,7 @@ def _run_ai_review(args: argparse.Namespace) -> int:
         report = ai_review.run(
             con, model=args.model, limit=args.limit, rules=rules, refresh=args.refresh,
             order=args.order, min_amount_cents=round(args.min_amount_brl * 100),
+            state=args.state, municipality=args.municipality,
         )
     finally:
         con.close()
@@ -332,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="'amount' = biggest money first; 'tight' = shortest cycles first (default: %(default)s)")
     par.add_argument("--min-amount-brl", type=float, default=0,
                      help="skip signals moving less than this many reais (default: 0)")
+    par.add_argument("--state", help="filtra sinais de candidatos desta UF (ex: AC)")
+    par.add_argument("--municipality", help="filtra sinais de candidatos deste município (ex: RIO BRANCO)")
     par.add_argument("--refresh", action="store_true", help="re-review signals already reviewed by this model")
     par.set_defaults(func=_run_ai_review)
 

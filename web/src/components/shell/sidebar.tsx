@@ -13,6 +13,7 @@ export function Sidebar({ counts }: { counts: SidebarCounts }) {
 
   const top: NavLink[] = [
     { href: "/", label: "Início" },
+    { href: "/acre", label: "📍 Acre / Rio Branco" },
     { href: "/grafo", label: "Grafo de correlações" },
     { href: "/ranking", label: "Bens declarados" },
     { href: "/emendas", label: "Emendas parlamentares" },

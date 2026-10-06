@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
   getExpenseCategoryRanking,
   getExpenseYears,
@@ -22,6 +23,10 @@ export default async function DespesaDesproporcionalPage({
   const sp = await searchParams;
   const years = getExpenseYears();
 
+  const localParam = typeof sp.local === "string" ? sp.local : "";
+  const isAcre = localParam === "acre" || localParam === "rio-branco";
+  const state = isAcre ? "AC" : undefined;
+
   const categoryParam = typeof sp.categoria === "string" ? sp.categoria : undefined;
   const category =
     categoryParam != null && EXPENSE_CATEGORIES.includes(categoryParam) ? categoryParam : undefined;
@@ -37,13 +42,15 @@ export default async function DespesaDesproporcionalPage({
   const page = Math.max(1, Number(sp.page) || 1);
 
   const { rows, total } = years.length > 0
-    ? getExpenseCategoryRanking({ category, year, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE })
+    ? getExpenseCategoryRanking({ category, year, state, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE })
     : { rows: [], total: 0 };
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const hrefFor = (p: Record<string, string | undefined>) => {
     const usp = new URLSearchParams();
     if (p.categoria && p.categoria !== ALL) usp.set("categoria", p.categoria);
+    const loc = p.local !== undefined ? p.local : localParam;
+    if (loc) usp.set("local", loc);
     if (p.ano) usp.set("ano", p.ano);
     if (p.page && p.page !== "1") usp.set("page", p.page);
     const s = usp.toString();
@@ -75,6 +82,23 @@ export default async function DespesaDesproporcionalPage({
             categories={EXPENSE_CATEGORIES}
             value={category}
           />
+        </div>
+
+        {/* Regional Filter Buttons */}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <span className="mono text-[11px] text-[var(--muted-2)]">Localidade:</span>
+          <Link
+            href={hrefFor({ local: "", page: "1" })}
+            className={`btn btn--sm${!localParam ? " btn--primary" : ""}`}
+          >
+            Brasil (Nacional)
+          </Link>
+          <Link
+            href={hrefFor({ local: "acre", page: "1" })}
+            className={`btn btn--sm${isAcre ? " btn--primary" : ""}`}
+          >
+            📍 Acre / Rio Branco (AC)
+          </Link>
         </div>
       </section>
 
